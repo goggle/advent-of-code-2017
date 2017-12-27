@@ -210,7 +210,5 @@ stop:
 	select {
 	case senderDead <- true:
 	}
-	// tchan <- true
-	// <-tchan
 	out <- count
 }
