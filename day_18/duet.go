@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 func main() {
@@ -20,143 +21,23 @@ func main() {
 		commands = append(commands, rowElements)
 
 	}
-	_, frequency := execute(commands)
-	fmt.Println("Solution of part 1:", frequency)
-	// fmt.Println("solution of part 2:", sum2)
+
+	_, freq := programSingle(commands)
+	fmt.Println("Solution to part 1:", freq)
+
 	ch1 := make(chan int)
 	ch2 := make(chan int)
+	ch1Dead := make(chan bool)
+	ch2Dead := make(chan bool)
 	out1 := make(chan int)
 	out2 := make(chan int)
-	go executeParallel(commands, 0, ch1, ch2, out1)
-	go executeParallel(commands, 1, ch2, ch1, out2)
+	go programPair(commands, 0, ch1, ch2, ch1Dead, ch2Dead, out1)
+	go programPair(commands, 1, ch2, ch1, ch2Dead, ch1Dead, out2)
 	<-out1
-	fmt.Println("Solution of part 2:", <-out2)
+	fmt.Println("Solution to part 2:", <-out2)
 }
 
-ype SyncQueue struct {
-	mu    sync.Mutex
-	queue []int
-}
-
-func (sq *SyncQueue) Active() (a bool) {
-	sq.mu.Lock()
-	if len(sq.queue) > 0 {
-		a = true
-	} else {
-		a = false
-	}
-	sq.mu.Unlock()
-	return
-}
-
-func (sq *SyncQueue) Add(value int) {
-	sq.mu.Lock()
-	sq.queue = append(sq.queue, value)
-	sq.mu.Unlock()
-}
-
-func (sq *SyncQueue) Pop() (value int) {
-	sq.mu.Lock()
-	value, sq.queue = sq.queue[0], sq.queue[1:]
-	sq.mu.Unlock()
-	return
-}
-
-func (sq *SyncQueue) Length() (length int) {
-	sq.mu.Lock()
-	length = len(sq.queue)
-	sq.mu.Unlock()
-	return
-}
-
-func executeParallel(commands [][]string, initValue int, sender chan int, receiver chan int, out chan int) {
-	count := 0
-	results := map[string]int{}
-	// sendQueue := []int{}
-	results["p"] = initValue
-
-	receiverQueue := []int{}
-	go func() {
-		for {
-			value := <-receiver
-			receiverQueue = append(receiverQueue, value)
-		}
-	}()
-
-	i := 0
-	for i < len(commands) {
-		// fmt.Println(initValue)
-		switch commands[i][0] {
-		case "snd":
-			count++
-			val, err := strconv.Atoi(commands[i][1])
-			if err != nil {
-				val = results[commands[i][1]]
-			}
-			// fmt.Println(initValue, count)
-			// sendQueue = append(sendQueue, val)
-			// ch <- val // Go-Routine is blocked now, until the value is received.
-			sender <- val
-		case "rcv":
-			// if results[commands[i][1]] != 0 {
-			// 	return count
-			// }
-
-			// If our sending queue is not empty, we send to the
-			// other go routine
-			// if len(sendQueue) > 0 {
-			// 	sendVal := sendQueue[0]
-			// 	sendQueue = sendQueue[1:]
-			// 	sender <- sendVal
-			// }
-			if len(receiverQueue) == 0 {
-				// fmt.Println(initValue)
-				out <- count
-			} else {
-				results[commands[i][1]] = receiverQueue[0]
-				receiverQueue = receiverQueue[1:]
-			}
-
-		case "set":
-			val, err := strconv.Atoi(commands[i][2])
-			if err != nil {
-				val = results[commands[i][2]]
-			}
-			results[commands[i][1]] = val
-		case "add":
-			val, err := strconv.Atoi(commands[i][2])
-			if err != nil {
-				val = results[commands[i][2]]
-			}
-			results[commands[i][1]] += val
-		case "mul":
-			val, err := strconv.Atoi(commands[i][2])
-			if err != nil {
-				val = results[commands[i][2]]
-			}
-			results[commands[i][1]] *= val
-		case "mod":
-			val, err := strconv.Atoi(commands[i][2])
-			if err != nil {
-				val = results[commands[i][2]]
-			}
-			results[commands[i][1]] %= val
-
-		case "jgz":
-			if results[commands[i][1]] != 0 {
-				val, err := strconv.Atoi(commands[i][2])
-				if err != nil {
-					val = results[commands[i][2]]
-				}
-				i += val
-				continue
-			}
-		}
-		i++
-	}
-}
-
-func execute(commands [][]string) (map[string]int, int) {
+func programSingle(commands [][]string) (map[string]int, int) {
 	results := map[string]int{}
 	freq := 0
 
@@ -194,17 +75,142 @@ func execute(commands [][]string) (map[string]int, int) {
 				return results, freq
 			}
 		case "jgz":
-			if results[commands[i][1]] != 0 {
-				val, err := strconv.Atoi(commands[i][2])
-				if err != nil {
-					val = results[commands[i][2]]
+			reg := commands[i][1]
+			regVal, err1 := strconv.Atoi(reg)
+			if err1 != nil {
+				regVal = results[commands[i][1]]
+			}
+			jmp := commands[i][2]
+			jmpVal, err2 := strconv.Atoi(jmp)
+			if err2 != nil {
+				jmpVal = results[commands[i][2]]
+			}
+			if regVal > 0 {
+				i += jmpVal
+				if i >= 0 && i < len(commands) {
+					continue
+				} else {
+					return results, freq
 				}
-				i += val
-				continue
 			}
 		}
 		i++
 	}
 
 	return results, freq
+}
+
+func programPair(commands [][]string, initValue int, sender chan int, receiver chan int, senderDead chan bool, receiverDead chan bool, out chan int) {
+	results := map[string]int{}
+	results["p"] = initValue
+	otherRoutineDead := false
+	var mux sync.Mutex
+	count := 0
+	commandQueue := []int{}
+	go func() {
+		for {
+			value := <-receiver
+			mux.Lock()
+			commandQueue = append(commandQueue, value)
+			mux.Unlock()
+			senderDead <- false
+		}
+	}()
+
+	// Checker for possible deadlock:
+	go func() {
+		for {
+			dead := <-receiverDead
+			mux.Lock()
+			otherRoutineDead = dead
+			mux.Unlock()
+		}
+	}()
+
+	for i := 0; i < len(commands); {
+		switch commands[i][0] {
+		case "snd":
+			val, err := strconv.Atoi(commands[i][1])
+			if err != nil {
+				val = results[commands[i][1]]
+			}
+			sender <- val
+			count++
+		case "rcv":
+		receive:
+			mux.Lock()
+			var ok bool
+			var value int
+			if len(commandQueue) > 0 {
+				value, commandQueue = commandQueue[0], commandQueue[1:]
+				ok = true
+			}
+			mux.Unlock()
+			if ok {
+				results[commands[i][1]] = value
+			} else {
+				senderDead <- true
+				mux.Lock()
+				deadLock := otherRoutineDead
+				mux.Unlock()
+				if deadLock {
+					goto stop
+				}
+				goto receive
+
+			}
+		case "set":
+			val, err := strconv.Atoi(commands[i][2])
+			if err != nil {
+				val = results[commands[i][2]]
+			}
+			results[commands[i][1]] = val
+		case "add":
+			val, err := strconv.Atoi(commands[i][2])
+			if err != nil {
+				val = results[commands[i][2]]
+			}
+			results[commands[i][1]] += val
+		case "mul":
+			val, err := strconv.Atoi(commands[i][2])
+			if err != nil {
+				val = results[commands[i][2]]
+			}
+			results[commands[i][1]] *= val
+		case "mod":
+			val, err := strconv.Atoi(commands[i][2])
+			if err != nil {
+				val = results[commands[i][2]]
+			}
+			results[commands[i][1]] %= val
+
+		case "jgz":
+			reg := commands[i][1]
+			regVal, err1 := strconv.Atoi(reg)
+			if err1 != nil {
+				regVal = results[commands[i][1]]
+			}
+			jmp := commands[i][2]
+			jmpVal, err2 := strconv.Atoi(jmp)
+			if err2 != nil {
+				jmpVal = results[commands[i][2]]
+			}
+			if regVal > 0 {
+				i += jmpVal
+				if i >= 0 && i < len(commands) {
+					continue
+				} else {
+					goto stop
+				}
+			}
+		}
+		i++
+	}
+stop:
+	select {
+	case senderDead <- true:
+	}
+	// tchan <- true
+	// <-tchan
+	out <- count
 }
